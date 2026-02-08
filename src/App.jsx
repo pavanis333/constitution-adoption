@@ -12,6 +12,8 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedParts, setExpandedParts] = useState([])
   const [showNavigator, setShowNavigator] = useState(false)
+  const [flipped, setFlipped] = useState(false)
+  const [selectedPart, setSelectedPart] = useState(null)
 
   useEffect(() => {
     const saved = localStorage.getItem('constitutionProgress')
@@ -60,6 +62,8 @@ function App() {
     setSelectedAnswer(null)
     setShowResult(false)
     setSearchQuery('')
+    setFlipped(false)
+    setSelectedPart(null)
   }
 
   const togglePartExpansion = (partId) => {
@@ -151,6 +155,12 @@ function App() {
 
   const renderModeSelector = () => (
     <div className="mode-selector">
+      <div className="mode-card" onClick={() => setMode('flashcards')}>
+        <div className="mode-icon">🗂️</div>
+        <h3>Flashcards</h3>
+        <p>Learn articles with interactive flashcards</p>
+      </div>
+
       <div className="mode-card" onClick={() => setMode('browse')}>
         <div className="mode-icon">📚</div>
         <h3>Parts & Articles</h3>
@@ -176,6 +186,159 @@ function App() {
       </div>
     </div>
   )
+
+  const renderFlashcards = () => {
+    // Get all articles as flashcards
+    const allArticles = []
+    constitutionData.parts.forEach(part => {
+      part.keyArticles.forEach(article => {
+        allArticles.push({
+          ...article,
+          partNumber: part.number,
+          partTitle: part.title
+        })
+      })
+    })
+
+    // Filter by selected part if any
+    const articles = selectedPart 
+      ? allArticles.filter(a => a.partNumber === selectedPart)
+      : allArticles
+
+    if (articles.length === 0) return <p>No articles available.</p>
+
+    const currentArticle = articles[currentIndex]
+
+    const nextCard = () => {
+      if (currentIndex < articles.length - 1) {
+        setCurrentIndex(currentIndex + 1)
+        setFlipped(false)
+      }
+    }
+
+    const prevCard = () => {
+      if (currentIndex > 0) {
+        setCurrentIndex(currentIndex - 1)
+        setFlipped(false)
+      }
+    }
+
+    const markAsMastered = () => {
+      const articleKey = `${currentArticle.partNumber}-${currentArticle.num}`
+      if (masteredArticles.includes(articleKey)) {
+        const updated = masteredArticles.filter(key => key !== articleKey)
+        setMasteredArticles(updated)
+        saveProgress(updated)
+      } else {
+        const updated = [...masteredArticles, articleKey]
+        setMasteredArticles(updated)
+        saveProgress(updated)
+        nextCard()
+      }
+    }
+
+    const articleKey = `${currentArticle.partNumber}-${currentArticle.num}`
+    const isMastered = masteredArticles.includes(articleKey)
+
+    return (
+      <div>
+        {/* Part Filter */}
+        <div style={{marginBottom: '20px'}}>
+          <label style={{marginRight: '10px', color: '#1a1f71', fontWeight: 'bold'}}>Filter by Part:</label>
+          <select 
+            value={selectedPart || 'all'}
+            onChange={(e) => {
+              setSelectedPart(e.target.value === 'all' ? null : e.target.value)
+              setCurrentIndex(0)
+              setFlipped(false)
+            }}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: '2px solid #D4AF37',
+              background: 'white',
+              fontSize: '1rem',
+              cursor: 'pointer'
+            }}
+          >
+            <option value="all">All Parts ({allArticles.length} articles)</option>
+            {constitutionData.parts.map(part => (
+              <option key={part.id} value={part.number}>
+                Part {part.number} ({part.keyArticles.length} articles)
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="progress-bar">
+          <div 
+            className="progress-fill" 
+            style={{width: `${((currentIndex + 1) / articles.length) * 100}%`}}
+          />
+        </div>
+
+        {/* Flashcard */}
+        <div className="flashcard">
+          <div 
+            className={`flashcard-inner ${flipped ? 'flipped' : ''}`}
+            onClick={() => setFlipped(!flipped)}
+          >
+            <div className="flashcard-front">
+              <div style={{fontSize: '0.9rem', color: '#5A67D8', marginBottom: '10px'}}>
+                Part {currentArticle.partNumber}
+              </div>
+              <h2 style={{fontSize: '2rem', marginBottom: '20px', color: '#1a1f71'}}>
+                Article {currentArticle.num}
+              </h2>
+              <p style={{fontSize: '1.3rem', color: '#2c3896'}}>
+                {currentArticle.title}
+              </p>
+              <p className="flashcard-hint">👆 Tap to flip</p>
+            </div>
+            <div className="flashcard-back">
+              <h3 style={{marginBottom: '15px', color: '#1a1f71'}}>Summary</h3>
+              <p style={{fontSize: '1.1rem', lineHeight: '1.8', textAlign: 'left'}}>
+                {currentArticle.summary}
+              </p>
+              <div style={{marginTop: '20px', padding: '10px', background: 'rgba(212,175,55,0.2)', borderRadius: '8px'}}>
+                <strong style={{color: '#1a1f71'}}>Part:</strong> {currentArticle.partTitle}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="controls">
+          <button 
+            className="btn btn-secondary" 
+            onClick={prevCard}
+            disabled={currentIndex === 0}
+          >
+            ⬅️ Previous
+          </button>
+          
+          <button 
+            className="btn btn-primary" 
+            onClick={markAsMastered}
+          >
+            {isMastered ? '✓ Mastered (click to unmark)' : '✓ Mark as Mastered'}
+          </button>
+          
+          <button 
+            className="btn btn-secondary" 
+            onClick={nextCard}
+            disabled={currentIndex === articles.length - 1}
+          >
+            Next ➡️
+          </button>
+        </div>
+
+        <div style={{textAlign: 'center', marginTop: '20px', color: '#1a1f71', fontSize: '1.1rem'}}>
+          Card {currentIndex + 1} of {articles.length}
+          {isMastered && <span style={{marginLeft: '15px', color: '#10b981'}}>✓ Mastered</span>}
+        </div>
+      </div>
+    )
+  }
 
   const renderBrowse = () => (
     <div>
@@ -632,6 +795,7 @@ function App() {
               ← Back to Home
             </button>
 
+            {mode === 'flashcards' && renderFlashcards()}
             {mode === 'browse' && renderBrowse()}
             {mode === 'search' && renderSearch()}
             {mode === 'quiz' && renderQuiz()}
