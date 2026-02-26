@@ -1,6 +1,55 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { constitutionData, quizQuestions } from './data'
 
+// ===== Spaced Repetition (SM-2 simplified) =====
+const SR_KEY = 'sr-flashcards'
+const QUIZ_STATE_KEY = 'constitutionQuizState'
+const QUIZ_HISTORY_KEY = 'quizHistory'
+
+function getDefaultSR(cardKey) {
+  return { key: cardKey, easeFactor: 2.5, interval: 0, repetitions: 0, nextReview: 0 }
+}
+
+function loadSR() {
+  try { return JSON.parse(localStorage.getItem(SR_KEY)) || {} } catch { return {} }
+}
+
+function saveSR(data) { localStorage.setItem(SR_KEY, JSON.stringify(data)) }
+
+function reviewCard(card, quality) {
+  // quality: 0=Again, 3=Hard, 4=Good, 5=Easy
+  let { easeFactor, interval, repetitions } = card
+  if (quality < 3) {
+    repetitions = 0
+    interval = 0
+  } else {
+    if (repetitions === 0) interval = 1
+    else if (repetitions === 1) interval = 3
+    else interval = Math.round(interval * easeFactor)
+    repetitions++
+  }
+  easeFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)))
+  const nextReview = Date.now() + interval * 86400000
+  return { ...card, easeFactor, interval, repetitions, nextReview }
+}
+
+function getAllArticles() {
+  const all = []
+  constitutionData.parts.forEach(part => {
+    part.keyArticles.forEach(article => {
+      all.push({ ...article, partNumber: part.number, partTitle: part.title, key: `${part.number}-${article.num}` })
+    })
+  })
+  return all
+}
+
+// ===== Quiz History =====
+function loadQuizHistory() {
+  try { return JSON.parse(localStorage.getItem(QUIZ_HISTORY_KEY)) || [] } catch { return [] }
+}
+function saveQuizHistory(h) { localStorage.setItem(QUIZ_HISTORY_KEY, JSON.stringify(h)) }
+
+// ===== App =====
 function App() {
   const [mode, setMode] = useState(null)
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -8,333 +57,180 @@ function App() {
   const [quizAnswers, setQuizAnswers] = useState([])
   const [selectedAnswer, setSelectedAnswer] = useState(null)
   const [showResult, setShowResult] = useState(false)
-  const [masteredArticles, setMasteredArticles] = useState([])
   const [searchQuery, setSearchQuery] = useState('')
   const [expandedParts, setExpandedParts] = useState([])
   const [showNavigator, setShowNavigator] = useState(false)
   const [flipped, setFlipped] = useState(false)
   const [selectedPart, setSelectedPart] = useState(null)
+  const [srData, setSrData] = useState(loadSR)
+  const [quizHistory, setQuizHistory] = useState(loadQuizHistory)
 
+  // Load quiz state on mode switch
   useEffect(() => {
-    const saved = localStorage.getItem('constitutionProgress')
-    if (saved) {
-      const data = JSON.parse(saved)
-      setMasteredArticles(data.masteredArticles || [])
-    }
-
-    const savedQuiz = localStorage.getItem('constitutionQuizState')
-    if (savedQuiz && mode === 'quiz') {
-      const quizData = JSON.parse(savedQuiz)
-      setCurrentIndex(quizData.currentIndex || 0)
-      setScore(quizData.score || 0)
-      setQuizAnswers(quizData.quizAnswers || [])
+    if (mode === 'quiz') {
+      const saved = localStorage.getItem(QUIZ_STATE_KEY)
+      if (saved) {
+        const d = JSON.parse(saved)
+        setCurrentIndex(d.currentIndex || 0)
+        setScore(d.score || 0)
+        setQuizAnswers(d.quizAnswers || [])
+      }
     }
   }, [mode])
 
-  const saveProgress = (mastered) => {
-    localStorage.setItem('constitutionProgress', JSON.stringify({
-      masteredArticles: mastered
-    }))
-  }
-
-  const saveQuizState = (index, currentScore, answers) => {
-    localStorage.setItem('constitutionQuizState', JSON.stringify({
-      currentIndex: index,
-      score: currentScore,
-      quizAnswers: answers
-    }))
-  }
-
-  const resetQuiz = () => {
-    localStorage.removeItem('constitutionQuizState')
-    setCurrentIndex(0)
-    setScore(0)
-    setQuizAnswers([])
-    setSelectedAnswer(null)
-    setShowResult(false)
+  const saveQuizState = (index, s, answers) => {
+    localStorage.setItem(QUIZ_STATE_KEY, JSON.stringify({ currentIndex: index, score: s, quizAnswers: answers }))
   }
 
   const resetMode = () => {
-    setMode(null)
-    setCurrentIndex(0)
-    setScore(0)
-    setQuizAnswers([])
-    setSelectedAnswer(null)
-    setShowResult(false)
-    setSearchQuery('')
+    setMode(null); setCurrentIndex(0); setScore(0); setQuizAnswers([]); setSelectedAnswer(null)
+    setShowResult(false); setSearchQuery(''); setFlipped(false); setSelectedPart(null); setShowNavigator(false)
+  }
+
+  const resetQuiz = () => {
+    localStorage.removeItem(QUIZ_STATE_KEY)
+    setCurrentIndex(0); setScore(0); setQuizAnswers([]); setSelectedAnswer(null); setShowResult(false)
+  }
+
+  // ===== Spaced Rep Helpers =====
+  const getDueCards = useCallback((partFilter) => {
+    const articles = getAllArticles().filter(a => !partFilter || a.partNumber === partFilter)
+    const now = Date.now()
+    const due = []; const notDue = []
+    articles.forEach(a => {
+      const sr = srData[a.key]
+      if (!sr || sr.nextReview <= now) due.push(a)
+      else notDue.push(a)
+    })
+    // Sort due by nextReview ascending (oldest first), then new cards
+    due.sort((a, b) => (srData[a.key]?.nextReview || 0) - (srData[b.key]?.nextReview || 0))
+    return [...due, ...notDue]
+  }, [srData])
+
+  const handleSRRating = (cardKey, quality) => {
+    const current = srData[cardKey] || getDefaultSR(cardKey)
+    const updated = reviewCard(current, quality)
+    const newData = { ...srData, [cardKey]: updated }
+    setSrData(newData); saveSR(newData)
+    // Move to next card
     setFlipped(false)
-    setSelectedPart(null)
+    setCurrentIndex(prev => prev + 1)
   }
 
-  const togglePartExpansion = (partId) => {
-    if (expandedParts.includes(partId)) {
-      setExpandedParts(expandedParts.filter(id => id !== partId))
-    } else {
-      setExpandedParts([...expandedParts, partId])
-    }
+  const getSRStats = () => {
+    const articles = getAllArticles()
+    const now = Date.now()
+    let mastered = 0, learning = 0, newCount = 0, dueCount = 0
+    articles.forEach(a => {
+      const sr = srData[a.key]
+      if (!sr) { newCount++; dueCount++; return }
+      if (sr.nextReview <= now) dueCount++
+      if (sr.repetitions >= 3 && sr.interval >= 7) mastered++
+      else learning++
+    })
+    return { total: articles.length, mastered, learning, new: newCount, due: dueCount }
   }
 
-  const handleQuizAnswer = (answerIndex) => {
-    if (quizAnswers[currentIndex]) {
-      const newAnswers = [...quizAnswers]
-      const correct = quizQuestions[currentIndex].correct === answerIndex
-      
-      const oldCorrect = newAnswers[currentIndex].correct
-      let newScore = score
-      if (oldCorrect && !correct) newScore--
-      if (!oldCorrect && correct) newScore++
-      
-      newAnswers[currentIndex] = {
-        question: currentIndex,
-        selected: answerIndex,
-        correct: correct
-      }
-      
-      setQuizAnswers(newAnswers)
-      setScore(newScore)
-      setSelectedAnswer(answerIndex)
-      saveQuizState(currentIndex, newScore, newAnswers)
-      return
-    }
-    
-    setSelectedAnswer(answerIndex)
-    const correct = quizQuestions[currentIndex].correct === answerIndex
-    
-    const newScore = correct ? score + 1 : score
-    const newAnswers = [...quizAnswers, {
-      question: currentIndex,
-      selected: answerIndex,
-      correct: correct
-    }]
-    
-    if (correct) {
-      setScore(newScore)
-    }
-    
-    setQuizAnswers(newAnswers)
-    saveQuizState(currentIndex, newScore, newAnswers)
-  }
+  // ===== RENDERERS =====
 
-  const nextQuizQuestion = () => {
-    if (currentIndex < quizQuestions.length - 1) {
-      const nextIndex = currentIndex + 1
-      setCurrentIndex(nextIndex)
-      if (quizAnswers[nextIndex]) {
-        setSelectedAnswer(quizAnswers[nextIndex].selected)
-      } else {
-        setSelectedAnswer(null)
-      }
-      saveQuizState(nextIndex, score, quizAnswers)
-    } else if (quizAnswers.length === quizQuestions.length) {
-      setShowResult(true)
-      localStorage.removeItem('constitutionQuizState')
-    }
-  }
-
-  const prevQuizQuestion = () => {
-    if (currentIndex > 0) {
-      const prevIndex = currentIndex - 1
-      setCurrentIndex(prevIndex)
-      if (quizAnswers[prevIndex]) {
-        setSelectedAnswer(quizAnswers[prevIndex].selected)
-      } else {
-        setSelectedAnswer(null)
-      }
-      saveQuizState(prevIndex, score, quizAnswers)
-    }
-  }
-
-  const getScoreEmoji = () => {
-    const percentage = (score / quizQuestions.length) * 100
-    if (percentage >= 90) return '🏆'
-    if (percentage >= 75) return '🌟'
-    if (percentage >= 60) return '👍'
-    if (percentage >= 50) return '😊'
-    return '📚'
-  }
-
-  const renderModeSelector = () => (
+  const renderHome = () => (
     <div className="mode-selector">
-      <div className="mode-card" onClick={() => setMode('flashcards')}>
-        <div className="mode-icon">🗂️</div>
-        <h3>Flashcards</h3>
-        <p>Learn articles with interactive flashcards</p>
-      </div>
-
-      <div className="mode-card" onClick={() => setMode('browse')}>
-        <div className="mode-icon">📚</div>
-        <h3>Parts & Articles</h3>
-        <p>Browse all parts with key articles and summaries</p>
-      </div>
-      
-      <div className="mode-card" onClick={() => setMode('search')}>
-        <div className="mode-icon">🔍</div>
-        <h3>Article Search</h3>
-        <p>Quick search by article number or keyword</p>
-      </div>
-      
-      <div className="mode-card" onClick={() => setMode('quiz')}>
-        <div className="mode-icon">❓</div>
-        <h3>Quiz Mode</h3>
-        <p>Test knowledge with UPSC-style questions</p>
-      </div>
-      
-      <div className="mode-card" onClick={() => setMode('progress')}>
-        <div className="mode-icon">📊</div>
-        <h3>Progress</h3>
-        <p>Track your learning progress</p>
-      </div>
+      {[
+        { key: 'flashcards', icon: '🗂️', title: 'Flashcards', desc: 'Spaced repetition learning' },
+        { key: 'browse', icon: '📚', title: 'Browse', desc: 'Parts & articles reference' },
+        { key: 'search', icon: '🔍', title: 'Search', desc: 'Find any article quickly' },
+        { key: 'quiz', icon: '❓', title: 'Quiz', desc: 'UPSC-style MCQs' },
+        { key: 'progress', icon: '📊', title: 'Progress', desc: 'Track your preparation' },
+      ].map(m => (
+        <div key={m.key} className="mode-card" onClick={() => { resetMode(); setMode(m.key) }}>
+          <div className="mode-icon">{m.icon}</div>
+          <h3>{m.title}</h3>
+          <p>{m.desc}</p>
+          {m.key === 'flashcards' && (() => { const s = getSRStats(); return s.due > 0 ? <div style={{marginTop:8}}><span className="due-badge">🔔 {s.due} due</span></div> : null })()}
+        </div>
+      ))}
     </div>
   )
 
   const renderFlashcards = () => {
-    // Get all articles as flashcards
-    const allArticles = []
-    constitutionData.parts.forEach(part => {
-      part.keyArticles.forEach(article => {
-        allArticles.push({
-          ...article,
-          partNumber: part.number,
-          partTitle: part.title
-        })
-      })
-    })
+    const cards = getDueCards(selectedPart)
+    const allArticles = getAllArticles()
+    const stats = getSRStats()
 
-    // Filter by selected part if any
-    const articles = selectedPart 
-      ? allArticles.filter(a => a.partNumber === selectedPart)
-      : allArticles
-
-    if (articles.length === 0) return <p>No articles available.</p>
-
-    const currentArticle = articles[currentIndex]
-
-    const nextCard = () => {
-      if (currentIndex < articles.length - 1) {
-        setCurrentIndex(currentIndex + 1)
-        setFlipped(false)
-      }
+    if (cards.length === 0) return <p style={{color:'var(--text-secondary)'}}>No articles available for this filter.</p>
+    if (currentIndex >= cards.length) {
+      return (
+        <div style={{textAlign:'center', padding:'40px 0'}}>
+          <div style={{fontSize:'3rem', marginBottom:16}}>🎉</div>
+          <h2 style={{color:'var(--accent)', marginBottom:12}}>All caught up!</h2>
+          <p style={{color:'var(--text-secondary)', marginBottom:24}}>No more cards to review right now.</p>
+          <button className="btn btn-primary" onClick={() => setCurrentIndex(0)}>Review Again</button>
+        </div>
+      )
     }
 
-    const prevCard = () => {
-      if (currentIndex > 0) {
-        setCurrentIndex(currentIndex - 1)
-        setFlipped(false)
-      }
-    }
-
-    const markAsMastered = () => {
-      const articleKey = `${currentArticle.partNumber}-${currentArticle.num}`
-      if (masteredArticles.includes(articleKey)) {
-        const updated = masteredArticles.filter(key => key !== articleKey)
-        setMasteredArticles(updated)
-        saveProgress(updated)
-      } else {
-        const updated = [...masteredArticles, articleKey]
-        setMasteredArticles(updated)
-        saveProgress(updated)
-        nextCard()
-      }
-    }
-
-    const articleKey = `${currentArticle.partNumber}-${currentArticle.num}`
-    const isMastered = masteredArticles.includes(articleKey)
+    const card = cards[currentIndex]
+    const sr = srData[card.key]
+    const isDue = !sr || sr.nextReview <= Date.now()
 
     return (
       <div>
-        {/* Part Filter */}
-        <div style={{marginBottom: '20px'}}>
-          <label style={{marginRight: '10px', color: '#1a1f71', fontWeight: 'bold'}}>Filter by Part:</label>
-          <select 
+        {/* Filter + Stats Row */}
+        <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:12, marginBottom:18}}>
+          <select
             value={selectedPart || 'all'}
-            onChange={(e) => {
-              setSelectedPart(e.target.value === 'all' ? null : e.target.value)
-              setCurrentIndex(0)
-              setFlipped(false)
-            }}
-            style={{
-              padding: '8px 16px',
-              borderRadius: '8px',
-              border: '2px solid #D4AF37',
-              background: 'white',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
+            onChange={e => { setSelectedPart(e.target.value === 'all' ? null : e.target.value); setCurrentIndex(0); setFlipped(false) }}
+            style={{ padding:'8px 14px', borderRadius:'var(--radius-sm)', border:'1px solid var(--border)', background:'var(--bg-input)', color:'var(--text-primary)', fontSize:'0.95rem', cursor:'pointer' }}
           >
-            <option value="all">All Parts ({allArticles.length} articles)</option>
-            {constitutionData.parts.map(part => (
-              <option key={part.id} value={part.number}>
-                Part {part.number} ({part.keyArticles.length} articles)
-              </option>
-            ))}
+            <option value="all">All Parts ({allArticles.length})</option>
+            {constitutionData.parts.map(p => <option key={p.id} value={p.number}>Part {p.number} ({p.keyArticles.length})</option>)}
           </select>
+          <span className="due-badge">🔔 {stats.due} due today</span>
         </div>
 
         <div className="progress-bar">
-          <div 
-            className="progress-fill" 
-            style={{width: `${((currentIndex + 1) / articles.length) * 100}%`}}
-          />
+          <div className="progress-fill" style={{width:`${((currentIndex + 1) / cards.length) * 100}%`}} />
         </div>
 
-        {/* Flashcard */}
+        {/* Card */}
         <div className="flashcard">
-          <div 
-            className={`flashcard-inner ${flipped ? 'flipped' : ''}`}
-            onClick={() => setFlipped(!flipped)}
-          >
+          <div className={`flashcard-inner ${flipped ? 'flipped' : ''}`} onClick={() => setFlipped(!flipped)}>
             <div className="flashcard-front">
-              <div style={{fontSize: '0.9rem', color: '#5A67D8', marginBottom: '10px'}}>
-                Part {currentArticle.partNumber}
-              </div>
-              <h2 style={{fontSize: '2rem', marginBottom: '20px', color: '#1a1f71'}}>
-                Article {currentArticle.num}
-              </h2>
-              <p style={{fontSize: '1.3rem', color: '#2c3896'}}>
-                {currentArticle.title}
-              </p>
-              <p className="flashcard-hint">👆 Tap to flip</p>
+              <div style={{fontSize:'0.85rem', color:'var(--text-muted)', marginBottom:8}}>Part {card.partNumber}</div>
+              <h2 style={{fontSize:'1.8rem', marginBottom:16, color:'var(--accent)'}}>Article {card.num}</h2>
+              <p style={{fontSize:'1.15rem', color:'var(--text-secondary)'}}>{card.title}</p>
+              {isDue && <span style={{position:'absolute', top:16, right:16, fontSize:'0.8rem', color:'var(--accent)', background:'var(--accent-dim)', padding:'3px 10px', borderRadius:12}}>Due</span>}
+              <p className="flashcard-hint">Tap to flip</p>
             </div>
             <div className="flashcard-back">
-              <h3 style={{marginBottom: '15px', color: '#1a1f71'}}>Summary</h3>
-              <p style={{fontSize: '1.1rem', lineHeight: '1.8', textAlign: 'left'}}>
-                {currentArticle.summary}
-              </p>
-              <div style={{marginTop: '20px', padding: '10px', background: 'rgba(212,175,55,0.2)', borderRadius: '8px'}}>
-                <strong style={{color: '#1a1f71'}}>Part:</strong> {currentArticle.partTitle}
+              <h3 style={{marginBottom:12, color:'var(--accent)'}}>Summary</h3>
+              <p style={{fontSize:'1.05rem', lineHeight:1.8, textAlign:'left', color:'var(--text-primary)'}}>{card.summary}</p>
+              <div style={{marginTop:16, padding:10, background:'var(--accent-dim)', borderRadius:'var(--radius-sm)', width:'100%', textAlign:'center'}}>
+                <span style={{color:'var(--accent)', fontWeight:600}}>Part {card.partNumber}:</span> <span style={{color:'var(--text-secondary)'}}>{card.partTitle}</span>
               </div>
+              <p className="flashcard-hint">Rate below ↓</p>
             </div>
           </div>
         </div>
 
-        <div className="controls">
-          <button 
-            className="btn btn-secondary" 
-            onClick={prevCard}
-            disabled={currentIndex === 0}
-          >
-            ⬅️ Previous
-          </button>
-          
-          <button 
-            className="btn btn-primary" 
-            onClick={markAsMastered}
-          >
-            {isMastered ? '✓ Mastered (click to unmark)' : '✓ Mark as Mastered'}
-          </button>
-          
-          <button 
-            className="btn btn-secondary" 
-            onClick={nextCard}
-            disabled={currentIndex === articles.length - 1}
-          >
-            Next ➡️
-          </button>
-        </div>
+        {/* SR Buttons (only when flipped) */}
+        {flipped && (
+          <div className="sr-buttons" style={{marginTop:24}}>
+            <button className="sr-btn again" onClick={e => { e.stopPropagation(); handleSRRating(card.key, 0) }}>Again</button>
+            <button className="sr-btn hard" onClick={e => { e.stopPropagation(); handleSRRating(card.key, 3) }}>Hard</button>
+            <button className="sr-btn good" onClick={e => { e.stopPropagation(); handleSRRating(card.key, 4) }}>Good</button>
+            <button className="sr-btn easy" onClick={e => { e.stopPropagation(); handleSRRating(card.key, 5) }}>Easy</button>
+          </div>
+        )}
 
-        <div style={{textAlign: 'center', marginTop: '20px', color: '#1a1f71', fontSize: '1.1rem'}}>
-          Card {currentIndex + 1} of {articles.length}
-          {isMastered && <span style={{marginLeft: '15px', color: '#10b981'}}>✓ Mastered</span>}
+        {/* Nav */}
+        <div style={{textAlign:'center', marginTop:16, color:'var(--text-muted)', fontSize:'0.9rem'}}>
+          Card {currentIndex + 1} of {cards.length}
+          {sr && sr.repetitions > 0 && <span style={{marginLeft:12, color:'var(--green)'}}>Interval: {sr.interval}d</span>}
+        </div>
+        <div className="controls">
+          <button className="btn btn-secondary" onClick={() => { setCurrentIndex(Math.max(0, currentIndex - 1)); setFlipped(false) }} disabled={currentIndex === 0}>⬅ Prev</button>
+          <button className="btn btn-secondary" onClick={() => { setCurrentIndex(Math.min(cards.length - 1, currentIndex + 1)); setFlipped(false) }} disabled={currentIndex >= cards.length - 1}>Next ➡</button>
         </div>
       </div>
     )
@@ -346,17 +242,13 @@ function App() {
         <h2>PREAMBLE</h2>
         <p className="preamble-text">{constitutionData.preamble.text}</p>
         <div className="preamble-keywords">
-          {constitutionData.preamble.keywords.map((keyword, idx) => (
-            <span key={idx} className="keyword">{keyword}</span>
-          ))}
+          {constitutionData.preamble.keywords.map((kw, i) => <span key={i} className="keyword">{kw}</span>)}
         </div>
       </div>
-
-      <h2 style={{marginBottom: '20px', color: '#1a1f71'}}>Parts of the Constitution</h2>
-      
+      <h2 style={{marginBottom:16, color:'var(--accent)', fontSize:'1.3rem'}}>Parts of the Constitution</h2>
       <div className="parts-list">
         {constitutionData.parts.map(part => (
-          <div key={part.id} className="part-card" onClick={() => togglePartExpansion(part.id)}>
+          <div key={part.id} className="part-card" onClick={() => setExpandedParts(prev => prev.includes(part.id) ? prev.filter(x => x !== part.id) : [...prev, part.id])}>
             <div className="part-header">
               <div>
                 <div className="part-number">PART {part.number}</div>
@@ -364,31 +256,22 @@ function App() {
               </div>
               <span className="article-range">Articles {part.articles}</span>
             </div>
-            
-            {part.chapters && (
-              <div style={{fontSize: '0.9rem', color: '#5A67D8', marginBottom: '10px'}}>
-                Chapters: {part.chapters.map(ch => ch.name).join(' | ')}
-              </div>
-            )}
-            
+            {part.chapters && <div style={{fontSize:'0.85rem', color:'var(--text-muted)', marginBottom:8}}>Chapters: {part.chapters.map(c => c.name).join(' | ')}</div>}
             {expandedParts.includes(part.id) && (
               <div className="article-list">
-                <h4 style={{color: '#1a1f71', marginBottom: '10px'}}>Key Articles:</h4>
-                {part.keyArticles.map((article, idx) => (
-                  <div key={idx} className="article-item">
-                    <span className="article-num">Art. {article.num}</span>
-                    <strong>{article.title}</strong>
-                    <p style={{marginTop: '5px', color: '#666', fontSize: '0.95rem'}}>
-                      {article.summary}
-                    </p>
+                <h4 style={{color:'var(--accent)', marginBottom:10, fontSize:'0.95rem'}}>Key Articles:</h4>
+                {part.keyArticles.map((a, i) => (
+                  <div key={i} className="article-item">
+                    <span className="article-num">Art. {a.num}</span>
+                    <strong style={{color:'var(--text-primary)'}}>{a.title}</strong>
+                    <p style={{marginTop:4, color:'var(--text-secondary)', fontSize:'0.9rem'}}>{a.summary}</p>
                   </div>
                 ))}
               </div>
             )}
-            
-            <div className="tags" style={{marginTop: '15px'}}>
+            <div className="tags" style={{marginTop:12}}>
               <span className="tag">{part.importance} Priority</span>
-              <span className="tag">{part.keyArticles.length} Key Articles</span>
+              <span className="tag">{part.keyArticles.length} Articles</span>
             </div>
           </div>
         ))}
@@ -397,46 +280,25 @@ function App() {
   )
 
   const renderSearch = () => {
-    const allArticles = []
-    constitutionData.parts.forEach(part => {
-      part.keyArticles.forEach(article => {
-        allArticles.push({...article, partNumber: part.number, partTitle: part.title})
-      })
-    })
-
-    const filtered = searchQuery.trim() 
-      ? allArticles.filter(article => 
-          article.num.toString().includes(searchQuery) ||
-          article.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          article.summary.toLowerCase().includes(searchQuery.toLowerCase())
-        )
+    const allArticles = getAllArticles()
+    const filtered = searchQuery.trim()
+      ? allArticles.filter(a => a.num.toString().includes(searchQuery) || a.title.toLowerCase().includes(searchQuery.toLowerCase()) || a.summary.toLowerCase().includes(searchQuery.toLowerCase()))
       : allArticles
-
     return (
       <div>
         <div className="search-box">
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search by article number, title, or keyword..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+          <input className="search-input" placeholder="Search by article number, title, or keyword..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
         </div>
-
-        <p style={{marginBottom: '20px', color: '#5A67D8'}}>
-          {filtered.length} article(s) found
-        </p>
-
+        <p style={{marginBottom:16, color:'var(--text-muted)', fontSize:'0.9rem'}}>{filtered.length} article(s) found</p>
         <div className="parts-list">
-          {filtered.map((article, idx) => (
-            <div key={idx} className="article-item" style={{marginBottom: '15px'}}>
-              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px'}}>
-                <span className="article-num">Article {article.num}</span>
-                <span style={{fontSize: '0.85rem', color: '#5A67D8'}}>Part {article.partNumber}</span>
+          {filtered.map((a, i) => (
+            <div key={i} className="article-item" style={{marginBottom:10}}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'start', marginBottom:6}}>
+                <span className="article-num">Article {a.num}</span>
+                <span style={{fontSize:'0.82rem', color:'var(--text-muted)'}}>Part {a.partNumber}</span>
               </div>
-              <strong style={{color: '#1a1f71', display: 'block', marginBottom: '5px'}}>{article.title}</strong>
-              <p style={{color: '#666', fontSize: '0.95rem'}}>{article.summary}</p>
+              <strong style={{color:'var(--text-primary)', display:'block', marginBottom:4}}>{a.title}</strong>
+              <p style={{color:'var(--text-secondary)', fontSize:'0.9rem'}}>{a.summary}</p>
             </div>
           ))}
         </div>
@@ -446,174 +308,97 @@ function App() {
 
   const renderQuiz = () => {
     if (showResult) {
-      const percentage = ((score / quizQuestions.length) * 100).toFixed(0)
-      
+      const pct = ((score / quizQuestions.length) * 100).toFixed(0)
+      const emoji = pct >= 90 ? '🏆' : pct >= 75 ? '🌟' : pct >= 60 ? '👍' : pct >= 50 ? '😊' : '📚'
       return (
         <div className="result-screen">
-          <div className="result-emoji">{getScoreEmoji()}</div>
-          <h2>Quiz Complete!</h2>
-          <div className="result-score">
-            {score} / {quizQuestions.length}
-          </div>
-          <p style={{fontSize: '1.5rem', color: '#1a1f71', marginBottom: '30px'}}>
-            You scored {percentage}%
-          </p>
-          
-          <div style={{textAlign: 'left', marginBottom: '30px'}}>
-            <h3 style={{marginBottom: '15px'}}>Review:</h3>
-            {quizAnswers.map((answer, idx) => (
-              <div key={idx} style={{
-                padding: '15px',
-                marginBottom: '10px',
-                background: answer.correct ? '#d1fae5' : '#fee2e2',
-                borderRadius: '8px',
-                border: '2px solid ' + (answer.correct ? '#10b981' : '#ef4444')
-              }}>
-                <p style={{fontWeight: 'bold', marginBottom: '5px'}}>
-                  Q{idx + 1}: {quizQuestions[idx].question}
-                </p>
-                <p style={{color: '#666'}}>
-                  {answer.correct ? '✓ Correct!' : `✗ Wrong - ${quizQuestions[idx].explanation}`}
-                </p>
+          <div className="result-emoji">{emoji}</div>
+          <h2 style={{color:'var(--text-primary)'}}>Quiz Complete!</h2>
+          <div className="result-score">{score} / {quizQuestions.length}</div>
+          <p style={{fontSize:'1.2rem', color:'var(--text-secondary)', marginBottom:24}}>You scored {pct}%</p>
+          <div style={{textAlign:'left', marginBottom:24}}>
+            <h3 style={{marginBottom:12, color:'var(--accent)'}}>Review:</h3>
+            {quizAnswers.map((ans, i) => (
+              <div key={i} className={`explanation-box ${ans.correct ? 'correct-exp' : 'incorrect-exp'}`} style={{marginBottom:10}}>
+                <p style={{fontWeight:600, marginBottom:4, color:'var(--text-primary)'}}>Q{i+1}: {quizQuestions[i].question}</p>
+                <p style={{color:'var(--text-secondary)'}}>{ans.correct ? '✓ Correct!' : `✗ Wrong — ${quizQuestions[i].explanation}`}</p>
               </div>
             ))}
           </div>
-
           <div className="controls">
-            <button className="btn btn-primary" onClick={resetQuiz}>
-              🔄 Retry Quiz
-            </button>
-            <button className="btn btn-secondary" onClick={resetMode}>
-              🏠 Back to Home
-            </button>
+            <button className="btn btn-primary" onClick={resetQuiz}>🔄 Retry</button>
+            <button className="btn btn-secondary" onClick={resetMode}>🏠 Home</button>
           </div>
         </div>
       )
     }
 
-    const question = quizQuestions[currentIndex]
+    const q = quizQuestions[currentIndex]
+    const jumpTo = idx => { setCurrentIndex(idx); setSelectedAnswer(quizAnswers[idx]?.selected ?? null); setShowNavigator(false) }
 
-    const jumpToQuestion = (index) => {
-      setCurrentIndex(index)
-      if (quizAnswers[index]) {
-        setSelectedAnswer(quizAnswers[index].selected)
-      } else {
-        setSelectedAnswer(null)
+    const handleAnswer = idx => {
+      setSelectedAnswer(idx)
+      const correct = q.correct === idx
+      const newAnswers = [...quizAnswers]
+      const oldAns = newAnswers[currentIndex]
+      let newScore = score
+      if (oldAns) {
+        if (oldAns.correct && !correct) newScore--
+        if (!oldAns.correct && correct) newScore++
+      } else if (correct) newScore++
+      newAnswers[currentIndex] = { question: currentIndex, selected: idx, correct }
+      setQuizAnswers(newAnswers); setScore(newScore)
+      saveQuizState(currentIndex, newScore, newAnswers)
+    }
+
+    const goNext = () => {
+      if (currentIndex < quizQuestions.length - 1) {
+        const ni = currentIndex + 1
+        setCurrentIndex(ni); setSelectedAnswer(quizAnswers[ni]?.selected ?? null)
+        saveQuizState(ni, score, quizAnswers)
+      } else if (quizAnswers.length === quizQuestions.length) {
+        setShowResult(true)
+        localStorage.removeItem(QUIZ_STATE_KEY)
+        const hist = loadQuizHistory()
+        hist.push({ date: Date.now(), score, total: quizQuestions.length })
+        saveQuizHistory(hist)
+        setQuizHistory(hist)
       }
-      saveQuizState(index, score, quizAnswers)
-      setShowNavigator(false)
+    }
+    const goPrev = () => {
+      if (currentIndex > 0) {
+        const pi = currentIndex - 1
+        setCurrentIndex(pi); setSelectedAnswer(quizAnswers[pi]?.selected ?? null)
+        saveQuizState(pi, score, quizAnswers)
+      }
     }
 
     return (
       <div>
         <div className="progress-bar">
-          <div 
-            className="progress-fill" 
-            style={{width: `${(quizAnswers.length / quizQuestions.length) * 100}%`}}
-          />
+          <div className="progress-fill" style={{width:`${(quizAnswers.length / quizQuestions.length) * 100}%`}} />
         </div>
-
-        <div style={{textAlign: 'center', margin: '15px 0'}}>
-          <button 
-            className="btn btn-secondary"
-            onClick={() => setShowNavigator(true)}
-            style={{fontSize: '0.95rem'}}
-          >
-            📋 Question Navigator ({quizAnswers.length}/{quizQuestions.length})
+        <div style={{textAlign:'center', margin:'12px 0'}}>
+          <button className="btn btn-secondary" onClick={() => setShowNavigator(true)} style={{fontSize:'0.9rem'}}>
+            📋 Navigator ({quizAnswers.length}/{quizQuestions.length})
           </button>
         </div>
 
         {showNavigator && (
-          <div style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0, 0, 0, 0.7)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            zIndex: 1000,
-            padding: '20px'
-          }} onClick={() => setShowNavigator(false)}>
-            <div style={{
-              background: '#FAFAD2',
-              borderRadius: '16px',
-              padding: '30px',
-              maxWidth: '700px',
-              maxHeight: '80vh',
-              overflow: 'auto',
-              width: '100%',
-              boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
-              border: '3px solid #D4AF37'
-            }} onClick={(e) => e.stopPropagation()}>
-              
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '20px'
-              }}>
-                <h3 style={{margin: 0, color: '#1a1f71'}}>Question Navigator</h3>
-                <button 
-                  onClick={() => setShowNavigator(false)}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    fontSize: '1.5rem',
-                    cursor: 'pointer',
-                    padding: '5px 10px',
-                    color: '#1a1f71'
-                  }}
-                >
-                  ✕
-                </button>
+          <div className="modal-overlay" onClick={() => setShowNavigator(false)}>
+            <div className="modal-content" onClick={e => e.stopPropagation()}>
+              <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16}}>
+                <h3 style={{color:'var(--accent)'}}>Question Navigator</h3>
+                <button onClick={() => setShowNavigator(false)} style={{background:'none', border:'none', fontSize:'1.3rem', cursor:'pointer', color:'var(--text-secondary)'}}>✕</button>
               </div>
-
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(50px, 1fr))',
-                gap: '10px'
-              }}>
-                {quizQuestions.map((_, idx) => {
-                  const isAnswered = quizAnswers[idx] !== undefined
-                  const isCurrent = idx === currentIndex
-                  const isCorrect = isAnswered && quizAnswers[idx].correct
-                  
-                  return (
-                    <button
-                      key={idx}
-                      onClick={() => jumpToQuestion(idx)}
-                      style={{
-                        padding: '12px',
-                        border: isCurrent ? '3px solid #D4AF37' : '2px solid #5A67D8',
-                        borderRadius: '8px',
-                        background: isCurrent 
-                          ? '#FFE4B5'
-                          : isAnswered 
-                            ? (isCorrect ? '#d1fae5' : '#fee2e2')
-                            : 'white',
-                        cursor: 'pointer',
-                        fontSize: '1rem',
-                        fontWeight: isCurrent ? 'bold' : 'normal',
-                        color: '#1a1f71',
-                        transition: 'all 0.2s'
-                      }}
-                    >
-                      {idx + 1}
-                    </button>
-                  )
+              <div className="nav-grid">
+                {quizQuestions.map((_, i) => {
+                  const ans = quizAnswers[i]
+                  let cls = 'nav-btn'
+                  if (i === currentIndex) cls += ' current'
+                  else if (ans) cls += ans.correct ? ' correct-nav' : ' incorrect-nav'
+                  return <button key={i} className={cls} onClick={() => jumpTo(i)}>{i+1}</button>
                 })}
-              </div>
-
-              <div style={{marginTop: '20px', textAlign: 'center'}}>
-                <button 
-                  className="btn btn-primary"
-                  onClick={() => setShowNavigator(false)}
-                >
-                  Close
-                </button>
               </div>
             </div>
           </div>
@@ -621,111 +406,87 @@ function App() {
 
         <div className="quiz-question">
           <h3>Question {currentIndex + 1} of {quizQuestions.length}</h3>
-          <p style={{fontSize: '1.3rem', marginBottom: '30px', color: '#1a1f71'}}>
-            {question.question}
-          </p>
-
+          <p style={{fontSize:'1.1rem', marginBottom:20, color:'var(--text-primary)', lineHeight:1.7, whiteSpace:'pre-line'}}>{q.question}</p>
           <div className="quiz-options">
-            {question.options.map((option, idx) => {
-              let className = 'quiz-option'
+            {q.options.map((opt, i) => {
+              let cls = 'quiz-option'
               if (selectedAnswer !== null) {
-                if (idx === question.correct) {
-                  className += ' correct'
-                } else if (idx === selectedAnswer) {
-                  className += ' incorrect'
-                }
+                if (i === q.correct) cls += ' correct'
+                else if (i === selectedAnswer) cls += ' incorrect'
               }
-
-              return (
-                <div
-                  key={idx}
-                  className={className}
-                  onClick={() => handleQuizAnswer(idx)}
-                >
-                  <strong>{String.fromCharCode(65 + idx)}.</strong> {option}
-                </div>
-              )
+              return <div key={i} className={cls} onClick={() => handleAnswer(i)}><strong>{String.fromCharCode(65+i)}.</strong> {opt}</div>
             })}
           </div>
-
           {selectedAnswer !== null && (
-            <div style={{
-              marginTop: '20px',
-              padding: '20px',
-              background: selectedAnswer === question.correct ? '#d1fae5' : '#fee2e2',
-              borderRadius: '12px',
-              border: '2px solid ' + (selectedAnswer === question.correct ? '#10b981' : '#ef4444')
-            }}>
-              <p style={{fontWeight: 'bold', marginBottom: '10px', color: '#1a1f71'}}>
-                {selectedAnswer === question.correct ? '✓ Correct!' : '✗ Incorrect'}
-              </p>
-              <p style={{color: '#2c3896'}}>{question.explanation}</p>
+            <div className={`explanation-box ${selectedAnswer === q.correct ? 'correct-exp' : 'incorrect-exp'}`}>
+              <p style={{fontWeight:600, marginBottom:4, color:'var(--text-primary)'}}>{selectedAnswer === q.correct ? '✓ Correct!' : '✗ Incorrect'}</p>
+              <p style={{color:'var(--text-secondary)'}}>{q.explanation}</p>
             </div>
           )}
         </div>
 
-        <div style={{textAlign: 'center', marginTop: '20px', color: '#1a1f71'}}>
-          Score: {score} / {quizAnswers.length}
-        </div>
-
-        <div className="controls" style={{marginTop: '20px'}}>
-          <button 
-            className="btn btn-secondary" 
-            onClick={prevQuizQuestion}
-            disabled={currentIndex === 0}
-          >
-            ⬅️ Previous
-          </button>
-          
-          <button 
-            className="btn btn-primary" 
-            onClick={nextQuizQuestion}
-            disabled={currentIndex === quizQuestions.length - 1 && quizAnswers.length < quizQuestions.length}
-          >
-            {currentIndex === quizQuestions.length - 1 && quizAnswers.length === quizQuestions.length ? '✓ Finish Quiz' : 'Next ➡️'}
+        <div style={{textAlign:'center', marginTop:14, color:'var(--text-muted)', fontSize:'0.9rem'}}>Score: {score} / {quizAnswers.length}</div>
+        <div className="controls">
+          <button className="btn btn-secondary" onClick={goPrev} disabled={currentIndex === 0}>⬅ Previous</button>
+          <button className="btn btn-primary" onClick={goNext} disabled={currentIndex === quizQuestions.length - 1 && quizAnswers.length < quizQuestions.length}>
+            {currentIndex === quizQuestions.length - 1 && quizAnswers.length === quizQuestions.length ? '✓ Finish' : 'Next ➡'}
           </button>
         </div>
-
-        <div className="controls" style={{marginTop: '10px'}}>
-          <button className="btn btn-secondary" onClick={resetQuiz}>
-            🔄 Reset Quiz
-          </button>
-          <button className="btn btn-secondary" onClick={resetMode}>
-            🏠 Back to Home
-          </button>
+        <div className="controls" style={{marginTop:8}}>
+          <button className="btn btn-secondary" onClick={resetQuiz}>🔄 Reset Quiz</button>
         </div>
       </div>
     )
   }
 
   const renderProgress = () => {
-    const totalParts = constitutionData.parts.length
-    const highPriorityParts = constitutionData.parts.filter(p => p.importance === 'HIGH').length
+    const stats = getSRStats()
+    const masteredPct = stats.total ? Math.round((stats.mastered / stats.total) * 100) : 0
 
     return (
       <div>
-        <h2 style={{marginBottom: '30px', color: '#1a1f71'}}>Your Progress</h2>
-        
+        <h2 style={{marginBottom:20, color:'var(--accent)', fontSize:'1.3rem'}}>Your Progress</h2>
+
+        {/* Overview Stats */}
         <div className="stats">
-          <div className="stat-card">
-            <h4>Total Parts</h4>
-            <div className="value">{totalParts}</div>
-          </div>
-          <div className="stat-card">
-            <h4>High Priority</h4>
-            <div className="value">{highPriorityParts}</div>
-          </div>
-          <div className="stat-card">
-            <h4>Quiz Questions</h4>
-            <div className="value">{quizQuestions.length}</div>
+          <div className="stat-card"><h4>Total Articles</h4><div className="value">{stats.total}</div></div>
+          <div className="stat-card"><h4>Mastered</h4><div className="value" style={{color:'var(--green)'}}>{stats.mastered}</div></div>
+          <div className="stat-card"><h4>Learning</h4><div className="value" style={{color:'var(--blue)'}}>{stats.learning}</div></div>
+          <div className="stat-card"><h4>New</h4><div className="value" style={{color:'var(--text-muted)'}}>{stats.new}</div></div>
+          <div className="stat-card"><h4>Due Today</h4><div className="value" style={{color:'var(--accent)'}}>{stats.due}</div></div>
+        </div>
+
+        {/* Mastery Progress */}
+        <div className="progress-section">
+          <h3>Overall Mastery — {masteredPct}%</h3>
+          <div className="progress-bar" style={{height:12, marginBottom:0}}>
+            <div className="progress-fill" style={{width:`${masteredPct}%`, background:'var(--green)'}} />
           </div>
         </div>
 
-        <div style={{marginTop: '30px', padding: '20px', background: 'rgba(255,255,255,0.9)', borderRadius: '12px', border: '2px solid #D4AF37'}}>
-          <h3 style={{color: '#1a1f71', marginBottom: '15px'}}>Key Facts</h3>
-          <ul style={{paddingLeft: '20px', lineHeight: '2', color: '#2c3896'}}>
-            <li>Total Articles: 395 (original) + Additional articles through amendments</li>
-            <li>Total Parts: 22 + Additional parts (IVA, IXA, IXB, XIVA)</li>
+        {/* Quiz History */}
+        <div className="progress-section">
+          <h3>Quiz History</h3>
+          {quizHistory.length === 0 ? (
+            <p style={{color:'var(--text-muted)'}}>No quizzes taken yet.</p>
+          ) : (
+            quizHistory.slice(-10).reverse().map((h, i) => (
+              <div key={i} className="progress-row">
+                <span style={{color:'var(--text-secondary)'}}>{new Date(h.date).toLocaleDateString()}</span>
+                <span style={{fontWeight:600, color: (h.score / h.total) >= 0.7 ? 'var(--green)' : (h.score / h.total) >= 0.5 ? 'var(--accent)' : 'var(--red)'}}>
+                  {h.score}/{h.total} ({Math.round((h.score / h.total) * 100)}%)
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Key Facts */}
+        <div className="progress-section">
+          <h3>Key Facts</h3>
+          <ul style={{paddingLeft:20, lineHeight:2, color:'var(--text-secondary)'}}>
+            <li>Total Articles: 395 (original) + amendments</li>
+            <li>Total Parts: 22 + additional (IVA, IXA, IXB, XIVA)</li>
             <li>Schedules: 12</li>
             <li>Adopted: 26 November 1949</li>
             <li>Came into force: 26 January 1950</li>
@@ -733,43 +494,28 @@ function App() {
           </ul>
         </div>
 
-        <div style={{marginTop: '30px'}}>
-          <h3 style={{color: '#1a1f71', marginBottom: '15px'}}>Coverage Summary</h3>
-          <div className="parts-list">
-            {constitutionData.parts.map(part => (
-              <div key={part.id} style={{
-                padding: '15px',
-                background: 'rgba(255,255,255,0.9)',
-                borderRadius: '8px',
-                marginBottom: '10px',
-                border: '2px solid #D4AF37'
-              }}>
-                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                  <div>
-                    <strong style={{color: '#1a1f71'}}>Part {part.number}:</strong> {part.title}
-                  </div>
-                  <div className="tags">
-                    <span className="tag">{part.keyArticles.length} Articles</span>
-                    <span className="tag">{part.importance}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="controls" style={{marginTop: '30px'}}>
-          <button 
-            className="btn btn-danger" 
-            onClick={() => {
-              if (confirm('Are you sure you want to reset all progress?')) {
-                setMasteredArticles([])
-                localStorage.removeItem('constitutionProgress')
+        {/* Reset Buttons */}
+        <div className="progress-section" style={{borderColor:'var(--red)', borderWidth:1}}>
+          <h3 style={{color:'var(--red)'}}>Reset Data</h3>
+          <div className="controls" style={{justifyContent:'flex-start', marginTop:12}}>
+            <button className="btn btn-danger" onClick={() => {
+              if (confirm('Reset all flashcard progress? This clears spaced repetition data.')) {
+                setSrData({}); saveSR({}); localStorage.removeItem('constitutionProgress')
               }
-            }}
-          >
-            🔄 Reset Progress
-          </button>
+            }}>🔄 Reset Flashcards</button>
+            <button className="btn btn-danger" onClick={() => {
+              if (confirm('Reset all quiz history and current quiz progress?')) {
+                resetQuiz(); setQuizHistory([]); saveQuizHistory([]); localStorage.removeItem(QUIZ_STATE_KEY)
+              }
+            }}>🔄 Reset Quizzes</button>
+            <button className="btn btn-danger" onClick={() => {
+              if (confirm('Reset ALL progress? This cannot be undone.')) {
+                setSrData({}); saveSR({}); setQuizHistory([]); saveQuizHistory([])
+                localStorage.removeItem('constitutionProgress'); localStorage.removeItem(QUIZ_STATE_KEY)
+                resetQuiz()
+              }
+            }}>⚠️ Reset Everything</button>
+          </div>
         </div>
       </div>
     )
@@ -780,21 +526,12 @@ function App() {
       <div className="container">
         <div className="header">
           <h1>⚖️ Constitution of India</h1>
-          <p>Master the Constitution for UPSC Civil Services Examination</p>
+          <p>Master the Constitution for UPSC Prelims</p>
         </div>
-
-        {!mode && renderModeSelector()}
-
+        {!mode && renderHome()}
         {mode && (
           <div className="content-area">
-            <button 
-              className="btn btn-secondary" 
-              onClick={resetMode}
-              style={{marginBottom: '20px'}}
-            >
-              ← Back to Home
-            </button>
-
+            <button className="btn btn-secondary" onClick={resetMode} style={{marginBottom:18}}>← Back to Home</button>
             {mode === 'flashcards' && renderFlashcards()}
             {mode === 'browse' && renderBrowse()}
             {mode === 'search' && renderSearch()}
